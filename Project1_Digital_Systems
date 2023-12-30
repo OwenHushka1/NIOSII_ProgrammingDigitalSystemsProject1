@@ -14,7 +14,7 @@
 
 ##### Macros ########
 .macro rori dst, src, i
-    roli    \dst, \src, (32 - \i)
+    roli    \dst, \src, (32 - \i) #right rotate macro
 .endm
 
 ####### Reset Vector: 0 ##############
