@@ -1,0 +1,288 @@
+.global _start
+
+######## Project 1: Adding Machine #########
+#this project is made to be run on a DE10Lite FPGA 
+#######Equates########
+.equ DE10Lite_MMIO_BASE, 0xFF200000 #base address of the DE10Lite 
+.equ O_UART_DATA, 0x1000  #offset for the UART's data register
+.equ O_UART_CTRL, 0x1004 #offset for UART's control register
+.equ O_BUTTON_DATA, 0x50 #offset for retrieving data from the button
+.equ O_BUTTON_INTMASK, 0x58 #offset for button interrupt mask register
+.equ O_BUTTON_EDGE, 0x5C #offset for button's edge capture register
+.equ O_7SEG_LO,       0x20 #offsets for the 7 segment display 
+.equ O_7SEG_HI,       0x30
+
+##### Macros ########
+.macro rori dst, src, i
+    roli    \dst, \src, (32 - \i)
+.endm
+
+####### Reset Vector: 0 ##############
+.section .reset, "ax"
+_start:
+    movia sp, 0x10000  #starting stack pointer
+    movia gp, DE10Lite_MMIO_BASE #base address pointer
+    br  main
+   
+###### Exception Vector 0x20 ##########
+.section .exceptions, "ax"
+    rdctl et, ipending    #check present pending IRQs
+    bne et, r0, HardwareInterrupt
+    eret                  # Non-interrupt exceptions are ignored
+   
+HardwareInterrupt:
+    subi ea, ea, 4        #rewind ea to restart aborted instr
+    subi sp, sp,  16      #save all used registers
+    stw r2, 0(sp)
+    stw r3, 4(sp)
+    stw r4, 8(sp)
+    stw ra, 12(sp)
+   
+###### Handle Pushbotton ISR for IRQ#1 #############
+
+    andi r2, et, 0b10     #check if irq number 1
+    beq r2, r0, NotIRQ1
+   
+    ldwio r3, 0x5c(gp)    #Read EdgeCapture register
+    stwio r3, 0x5c(gp)    #Reset EdgeCapture bits: Deassert IRQ1
+   
+    andi r3, r3, 1
+    beq r3, r0, NotIRQ1  #branch to end of exception handler
+    stw r0, Total(r0)
+   
+    movia r2, 0x3f3f3f3f   #set seven seg displays to 0000000
+    stwio r2, O_7SEG_LO(gp)
+    stwio r2, O_7SEG_HI(gp)
+   
+    movia r4, ResetResponse  #reprint "Enter number:"
+    call puts
+   
+NotIRQ1:
+
+ISR_Done:
+    ldw r2, 0(sp)
+    ldw r3, 4(sp)
+    ldw r4, 8(sp)
+    ldw ra, 12(sp)
+    addi sp, sp, 16        #prologue: save ALL used registers
+    eret
+   
+##########main###############
+
+.text
+main:
+    #Start by enabling the Pushbutton Interrupts
+    movi r2, 3  #bits 0 and 1
+    stwio r2, 0x58(gp)
+   
+    #next, enable IRQ#1
+    movi r2, 2    #bit 1
+    wrctl ienable, r2
+   
+    movi r2, 1   #enable Systemwide interrupts by enabling the pie bit
+    wrctl status, r2 #status.PIE = 1
+   
+    movia r4, Greeting   #move the greeting to the first argument register
+    call puts           #print the greating
+   
+loop_main:              #while(1){
+    movia r4, Prompt    #move the prompt to the first argument register
+    call puts           #print the prompt
+   
+    movia r4, Buffer    #gets(Buffer);
+    call gets           #get the response from the user
+   
+    movia r4, Buffer    #r4 = atoi(Buffer):
+    call atoi           #convert to an int
+   
+    ldw r16, Total(r0)    #load the total from the stack
+    add r16, r16, r2     #add the new value to the sum
+    stw r16, Total(r0)   #save this new Total to the stack
+   
+    movia r4, Response
+    call puts      #print the response
+   
+    mov r4, r16
+    call printNum    #print the number
+    mov r4, r16
+    call showNum
+   
+stop: br loop_main
+
+#######
+#void showNum(int n) -- convert to 7-seg bits
+
+showNum:
+    subi sp, sp, 4
+    stw ra, (sp)
+   
+    call num2bits
+    stwio r2, O_7SEG_LO(gp)  
+    mov r4, r3
+    call num2bits
+    stwio r2, O_7SEG_HI(gp)
+   
+    ldw ra, (sp)
+    addi sp, sp, 4
+    ret
+   
+#convert n to seven seg bits
+#bits returned in r2; final quotient returned in r3
+num2bits:
+    movi r2, 0   #Accumulate bits in r2, ready to return
+    movi r10, 10 #store 10 for dividing
+    movi r7, 4   #loop counter i
+n2b_loop:        #do{
+    divu r3, r4, r10
+    mul r5, r3, r10
+    sub r5, r4, r5
+    ldbu r6, Bits7seg(r5)
+    or r2, r2, r6
+    rori r2, r2, 8 #using the rori macro
+   
+    mov r4, r3
+    subi r7, r7, 1
+    bgt r7, r0, n2b_loop
+   
+    ret
+   
+#################
+#int printNum(int n) -- print number to UART
+printNum:
+    subi sp, sp, 8
+    stw ra, 4(sp)
+   
+    bge r4, r0, not_neg
+    sub r4, r0, r4
+    stw r4, 0(sp)
+    movi r4, '-'
+    call putchar
+    ldw r4, 0(sp)
+not_neg:
+    movi r10, 10 #if(n <10)
+    bge r4, r10, not_base
+    addi r4, r4, '0'  #putchar('0' + n);
+    call putchar
+    br printNum_done
+   
+not_base:
+    movi r10, 10
+    div r3, r4, r10  #r3 = n /10;
+    mul r5, r3, r10
+    sub r5, r4, r5  #r5 = n % 10;
+    stw r5, 0(sp)
+    mov r4, r3
+    call printNum    #printNum(n/10);
+    ldw r5, 0(sp)
+    addi r4, r5, '0'
+    call putchar   #putchar('0' + (n % 10));
+   
+printNum_done:
+    ldw ra, 4(sp)
+    addi sp, sp, 8
+    ret
+
+#############
+#int atoi(char* str) --- convert string to number using Horner's Algorithm
+atoi:
+    movi r2, 0   #sum = 0;
+    movi r3, 0   #negate = 0;
+    ldbu r5, (r4)    #*str
+    cmpeqi r6, r5, '-' # == '-'
+    beq r6, r0, no_negate
+    movi r3, 1   #negate = 1
+atoi_loop:
+    addi r4, r4, 1   #str++;
+    ldbu r5, (r4)    #*str
+no_negate:
+    movi r6, '0'
+    blt r5, r6, atoi_done
+    movi r6, '9'
+    bgt r5, r6, atoi_done
+   
+    muli r2, r2, 10    #sum *=10
+    subi r5, r5, '0'  #sum += c
+    add r2, r2, r5
+    br atoi_loop
+atoi_done:
+    beq r3, r0, dont_negate
+    sub r2, r0, r2   #-sum
+dont_negate:
+    ret
+
+
+ #function to print strings to the UART
+puts:
+    ldbu r3, (r4)    # c = *buf;
+    addi r4, r4, 1   #buff++;
+    beq r3, r0, puts_done
+   
+    ldwio r2, O_UART_CTRL(gp)
+    srli r2, r2, 16
+    beq r2,  r0, putchar
+    stwio r3, O_UART_DATA(gp)
+
+    br puts
+       
+puts_done:
+    ret
+   
+gets:
+    ldwio r2, O_UART_DATA(gp)
+    andi r3, r2, 0x8000
+    beq r3, r0, gets
+    andi r2, r2, 0xFF
+   
+    stwio r2, O_UART_DATA(gp)
+   
+    movi r3, '\n'
+    beq r2, r3, gets_done
+    stb r2, (r4)
+    addi r4, r4, 1
+    br gets
+       
+ gets_done:
+    stb r0, (r4)  # *buf = '\0'
+    ret
+   
+#void putchar(char c)
+putchar:
+    ldwio r2, O_UART_CTRL(gp)
+    srli r2, r2, 16
+    beq r2, r0, putchar
+    stwio r4, O_UART_DATA(gp)
+    ret
+   
+### char getchar(void)
+getchar:
+    ldwio r2, O_UART_DATA(gp)
+    andi r3, r2, 0x8000
+    beq r3, r0, getchar
+    andi r2, r2, 0xFF
+    ret
+.data
+
+Total: .word 0
+
+Buffer:
+    .space 100, 0
+   
+Prompt:
+    .asciz "\nEnter number: "
+   
+Response:
+    .asciz "Total: "
+   
+ResetResponse:
+    .asciz "\nTotal: 0\nEnter number: "
+   
+Greeting:
+    .asciz "\nWelcome to the Simple Adding Machine\n"
+     
+Bits7seg:
+    #        0.   1.     2.    3.   4.    5.    6.    7.    8.    9
+    .byte  0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x67
+    .byte  0x77, 0x7c, 0x39, 0x5E, 0x79, 0x71
+    #       A.    B      C.    D.   E.    F
+
+.end
