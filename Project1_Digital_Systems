@@ -64,7 +64,7 @@ ISR_Done:
     ldw r3, 4(sp)
     ldw r4, 8(sp)
     ldw ra, 12(sp)
-    addi sp, sp, 16        #prologue: save ALL used registers
+    addi sp, sp, 16         #epilogue: restore all used registers
     eret
    
 ##########main###############
